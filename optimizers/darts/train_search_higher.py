@@ -23,7 +23,7 @@ from optimizers.darts.architect import Architect
 from optimizers.darts.model_search import Network
 
 from sotl_utils import wandb_auth
-import wandb
+
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the darts corpus')
@@ -54,6 +54,18 @@ parser.add_argument('--search_space', choices=['1', '2', '3'], default='1')
 parser.add_argument('--debug', action='store_true', default=False, help='run only for some batches')
 parser.add_argument('--warm_start_epochs', type=int, default=0,
                     help='Warm start one-shot model before starting architecture updates.')
+
+
+parser.add_argument('--higher_method' ,       type=str, choices=['val', 'sotl'],   default='sotl', help='Whether to take meta gradients with respect to SoTL or val set (which might be the same as training set if they were merged)')
+parser.add_argument('--higher_params' ,       type=str, choices=['weights', 'arch'],   default='arch', help='Whether to do meta-gradients with respect to the meta-weights or architecture')
+parser.add_argument('--higher_order' ,       type=str, choices=['first', 'second', None],   default="first", help='Whether to do meta-gradients with respect to the meta-weights or architecture')
+parser.add_argument('--higher_loop' ,       type=str, choices=['bilevel', 'joint'],   default="bilevel", help='Whether to make a copy of network for the Higher rollout or not. If we do not copy, it will be as in joint training')
+parser.add_argument('--higher_reduction' ,       type=str, choices=['mean', 'sum'],   default='sum', help='Reduction across inner steps - relevant for first-order approximation')
+parser.add_argument('--higher_reduction_outer' ,       type=str, choices=['mean', 'sum'],   default='sum', help='Reduction across the meta-betach size')
+parser.add_argument('--meta_algo' ,       type=str, choices=['reptile', 'metaprox', 'darts_higher', "gdas_higher", "setn_higher", "enas_higher"],   default=None, help='Whether to do meta-gradients with respect to the meta-weights or architecture')
+
+
+
 args = parser.parse_args()
 
 args.save = 'experiments/darts/search_space_{}/search-{}-{}-{}-{}'.format(args.search_space, args.save,
@@ -101,9 +113,6 @@ def main():
     torch.cuda.manual_seed(args.seed)
     logging.info('gpu device = %d' % args.gpu)
     logging.info("args = %s", args)
-    
-    wandb_auth()
-    run = wandb.init(project="NAS", group=f"Search_Cell_darts_orig", reinit=True)
 
     criterion = nn.CrossEntropyLoss()
     criterion = criterion.cuda()
@@ -169,11 +178,6 @@ def main():
         # validation
         valid_acc, valid_obj = infer(valid_queue, model, criterion)
         logging.info('valid_acc %f', valid_acc)
-        
-        genotype_perf, _, _, _ = naseval.eval_one_shot_model(config=args.__dict__,
-                                                               model=arch_filename)
-        
-        wandb_log = {"train_acc":train_acc, "train_loss":train_obj, "val_acc": valid_acc, "valid_loss":valid_obj, "search.final.cifar10": genotype_perf, "epoch":epoch}
 
         utils.save(model, os.path.join(args.save, 'weights.pt'))
 
@@ -243,8 +247,6 @@ def infer(valid_queue, model, criterion):
     model.eval()
 
     for step, (input, target) in enumerate(valid_queue):
-        if step > 101:
-            break
         input = input.cuda()
         target = target.cuda(non_blocking=True)
 
