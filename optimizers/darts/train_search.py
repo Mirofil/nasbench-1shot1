@@ -22,8 +22,10 @@ from optimizers.darts import utils
 from optimizers.darts.architect import Architect
 from optimizers.darts.model_search import Network
 
-from sotl_utils import wandb_auth
+from optimizers.sotl_utils import wandb_auth
 import wandb
+from pathlib import Path
+from tqdm import tqdm
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the darts corpus')
@@ -103,7 +105,7 @@ def main():
     logging.info("args = %s", args)
     
     wandb_auth()
-    run = wandb.init(project="NAS", group=f"Search_Cell_darts_orig", reinit=True)
+    run = wandb.init(project="NAS", group=f"Search_Cell_nb101", reinit=True)
 
     criterion = nn.CrossEntropyLoss()
     criterion = criterion.cuda()
@@ -113,7 +115,7 @@ def main():
     logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
     optimizer = torch.optim.SGD(
-        model.parameters(),
+        model.weights_parameters(),
         args.learning_rate,
         momentum=args.momentum,
         weight_decay=args.weight_decay)
@@ -139,8 +141,22 @@ def main():
         optimizer, float(args.epochs), eta_min=args.learning_rate_min)
 
     architect = Architect(model, args)
+    
+    if os.path.exists(Path(args.save) / "checkpoint.pt"):
+        checkpoint = torch.load(Path(args.save) / "checkpoint.pt")
+        optimizer.load_state_dict(checkpoint["w_optimizer"])
+        architect.optimizer.load_state_dict(checkpoint["a_optimizer"])
+        model.load_state_dict(checkpoint["model"])
+        scheduler.load_state_dict(checkpoint["w_scheduler"])
+        start_epoch = checkpoint["epoch"]
+        all_logs = checkpoint["all_logs"]
 
-    for epoch in range(args.epochs):
+    else:
+        print(f"Path at {Path(args.save) / 'checkpoint.pt'} does not exist")
+        start_epoch=0
+        all_logs=[]
+        
+    for epoch in tqdm(range(start_epoch, args.epochs), desc = "Iterating over epochs", total = args.epochs - start_epoch):
         scheduler.step()
         lr = scheduler.get_lr()[0]
         # increase the cutout probability linearly throughout search
@@ -174,20 +190,29 @@ def main():
                                                                model=arch_filename)
         
         wandb_log = {"train_acc":train_acc, "train_loss":train_obj, "val_acc": valid_acc, "valid_loss":valid_obj, "search.final.cifar10": genotype_perf, "epoch":epoch}
-
-        utils.save(model, os.path.join(args.save, 'weights.pt'))
+        all_logs.append(wandb_log)
+        wandb.log(wandb_log)
+        
+        utils.save_checkpoint({"model":model.state_dict(), "w_optimizer":optimizer.state_dict(), 
+                           "a_optimizer":architect.optimizer.state_dict(), "w_scheduler":scheduler.state_dict(), "epoch": epoch, 
+                           "all_logs":all_logs}, 
+                          Path(args.save) / "checkpoint.pt")
+        print(f"Saved checkpoint to {Path(args.save) / 'checkpoint.pt'}")
+        # utils.save(model, os.path.join(args.save, 'weights.pt'))
 
     logging.info('STARTING EVALUATION')
     test, valid, runtime, params = naseval.eval_one_shot_model(config=args.__dict__,
                                                                model=arch_filename)
-    index = np.random.choice(list(range(3)))
+    index = 0
     logging.info('TEST ERROR: %.3f | VALID ERROR: %.3f | RUNTIME: %f | PARAMS: %d'
                  % (test[index],
                     valid[index],
                     runtime[index],
                     params[index])
                  )
-
+    wandb.log({"test_error":test[index], "valid_error": valid[index], "runtime":runtime[index], "params":params[index]})
+    for log in tqdm(all_logs, desc = "Logging search logs"):
+        wandb.log(log)
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, epoch):
     objs = utils.AvgrageMeter()
@@ -221,8 +246,11 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
 
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        if step == 0:
+            print(f"Arch params before step for debugging if they change: {model.alphas_mixed_op[0]}")
         optimizer.step()
-
+        if step == 0:
+            print(f"Arch params after step for debugging if they change: {model.alphas_mixed_op[0]}")
         prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
         objs.update(loss.data.item(), n)
         top1.update(prec1.data.item(), n)

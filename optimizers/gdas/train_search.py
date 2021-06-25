@@ -22,6 +22,10 @@ from optimizers.darts import utils
 from optimizers.gdas.architect import ArchitectGDAS as Architect
 from optimizers.gdas.model_search import GDASNetwork as Network
 
+from optimizers.sotl_utils import wandb_auth
+import wandb
+from pathlib import Path
+
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the darts corpus')
 parser.add_argument('--batch_size', type=int, default=96, help='batch size')
@@ -99,7 +103,10 @@ def main():
     torch.cuda.manual_seed(args.seed)
     logging.info('gpu device = %d' % args.gpu)
     logging.info("args = %s", args)
-
+    
+    wandb_auth()
+    run = wandb.init(project="NAS", group=f"Search_Cell_nb101", reinit=True)
+    
     criterion = nn.CrossEntropyLoss()
     criterion = criterion.cuda()
     # Create the decrease step for the gumbel softmax temperature

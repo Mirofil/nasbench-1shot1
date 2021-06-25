@@ -23,7 +23,9 @@ from optimizers.darts.architect import Architect
 from optimizers.darts.model_search import Network
 
 from sotl_utils import wandb_auth
-
+import wandb
+from pathlib import Path
+from tqdm import tqdm
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the darts corpus')
@@ -113,7 +115,10 @@ def main():
     torch.cuda.manual_seed(args.seed)
     logging.info('gpu device = %d' % args.gpu)
     logging.info("args = %s", args)
-
+    
+    wandb_auth()
+    run = wandb.init(project="NAS", group=f"Search_Cell_nb101", reinit=True)
+    
     criterion = nn.CrossEntropyLoss()
     criterion = criterion.cuda()
     model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion, output_weights=args.output_weights,
@@ -122,7 +127,7 @@ def main():
     logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
     optimizer = torch.optim.SGD(
-        model.parameters(),
+        model.weights_parameters(),
         args.learning_rate,
         momentum=args.momentum,
         weight_decay=args.weight_decay)
@@ -148,7 +153,20 @@ def main():
         optimizer, float(args.epochs), eta_min=args.learning_rate_min)
 
     architect = Architect(model, args)
-
+    
+    if os.path.exists(Path(args.save) / "checkpoint.pt"):
+        checkpoint = torch.load(Path(args.save) / "checkpoint.pt")
+        optimizer.load_state_dict(checkpoint["w_optimizer"])
+        architect.optimizer.load_state_dict(checkpoint["a_optimizer"])
+        model.load_state_dict(checkpoint["model"])
+        scheduler.load_state_dict(checkpoint["w_scheduler"])
+        start_epoch = checkpoint["epoch"]
+        all_logs = checkpoint["all_logs"]
+    else:
+        print(f"Path at {Path(args.save) / 'checkpoint.pt'} does not exist")
+        start_epoch=0
+        all_logs=[]
+        
     for epoch in range(args.epochs):
         scheduler.step()
         lr = scheduler.get_lr()[0]
@@ -179,7 +197,11 @@ def main():
         valid_acc, valid_obj = infer(valid_queue, model, criterion)
         logging.info('valid_acc %f', valid_acc)
 
-        utils.save(model, os.path.join(args.save, 'weights.pt'))
+        # utils.save(model, os.path.join(args.save, 'weights.pt'))
+        utils.save_checkpoint({"model":model.state_dict(), "w_optimizer":optimizer.state_dict(), 
+                    "a_optimizer":architect.optimizer.state_dict(), "w_scheduler":scheduler.state_dict(), "epoch": epoch, 
+                    "all_logs":all_logs}, 
+                    Path(args.save) / "checkpoint.pt")
 
     logging.info('STARTING EVALUATION')
     test, valid, runtime, params = naseval.eval_one_shot_model(config=args.__dict__,
@@ -191,7 +213,8 @@ def main():
                     runtime[index],
                     params[index])
                  )
-
+    for log in tqdm(all_logs, desc = "Logging search logs"):
+        wandb.log(log)
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, epoch):
     objs = utils.AvgrageMeter()
@@ -247,6 +270,8 @@ def infer(valid_queue, model, criterion):
     model.eval()
 
     for step, (input, target) in enumerate(valid_queue):
+        if step > 101:
+            break
         input = input.cuda()
         target = target.cuda(non_blocking=True)
 

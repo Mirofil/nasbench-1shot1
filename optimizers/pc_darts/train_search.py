@@ -21,6 +21,11 @@ from optimizers.darts import utils
 from optimizers.darts.architect import Architect
 from optimizers.pc_darts.model_search import PCDARTSNetwork as Network
 
+
+from pathlib import Path
+import wandb
+from tqdm import dqm
+
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the darts corpus')
 parser.add_argument('--batch_size', type=int, default=96, help='batch size')
@@ -106,7 +111,7 @@ def main():
     logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
     optimizer = torch.optim.SGD(
-        model.parameters(),
+        model.weights_parameters(),
         args.learning_rate,
         momentum=args.momentum,
         weight_decay=args.weight_decay)
@@ -159,7 +164,12 @@ def main():
         valid_acc, valid_obj = infer(valid_queue, model, criterion)
         logging.info('valid_acc %f', valid_acc)
 
-        utils.save(model, os.path.join(args.save, 'weights.pt'))
+
+        utils.save_checkpoint({"model":model.state_dict(), "w_optimizer":optimizer.state_dict(), 
+                           "a_optimizer":architect.optimizer.state_dict(), "w_scheduler":scheduler.state_dict(), "epoch": epoch}, 
+                          Path(args.save) / "checkpoint.pt")
+        print(f"Saved checkpoint to {Path(args.save) / 'checkpoint.pt'}")
+        # utils.save(model, os.path.join(args.save, 'weights.pt'))
 
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, epoch):
@@ -194,8 +204,11 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
 
         loss.backward()
         nn.utils.clip_grad_norm(model.parameters(), args.grad_clip)
+        if step == 0:
+            print(f"Arch params before step for debugging if they change: {model.alphas_normal[0]}")
         optimizer.step()
-
+        if step == 0:
+            print(f"Arch params after step for debugging if they change: {model.alphas_normal[0]}")
         prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
         objs.update(loss.data.item(), n)
         top1.update(prec1.data.item(), n)
@@ -214,6 +227,8 @@ def infer(valid_queue, model, criterion):
     model.eval()
 
     for step, (input, target) in enumerate(valid_queue):
+        if step > 101:
+            break
         input = input.cuda()
         target = target.cuda(non_blocking=True)
 
